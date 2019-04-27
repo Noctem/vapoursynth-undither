@@ -1,14 +1,15 @@
+#include <vapoursynth/VapourSynth.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <iterator>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-
-#include <vapoursynth/VapourSynth.h>
 
 #include "gifdec.h"
 
@@ -208,6 +209,12 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
     unique_ptr<UnditherData> d(new UnditherData);
 
     gd_GIF *gif = gd_open_gif(vsapi->propGetData(in, "path", 0, 0));
+
+    if (gif == nullptr) {
+        vsapi->setError(out, "Undither: failed to open GIF file");
+        return;
+    }
+
     d->vi.format = vsapi->getFormatPreset(pfRGB24, core);
     d->vi.numFrames = 0;
     d->width = d->vi.width = gif->width;
@@ -219,10 +226,10 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
     d->palette = new vector<prgb>;
     d->frames = new vector<uint32_t *>;
 
-    uint32_t *buf = new uint32_t[d->pixels];
-    if (gif->bgindex)
-        memset(buf, static_cast<uint32_t>(gif->bgindex), d->pixels);
-
+    uint32_t *buf = new uint32_t[d->pixels]();
+    if (gif->bgindex) {
+        for (int i = 0; i < d->pixels; i++) buf[i] = gif->bgindex;
+    }
     while (gd_get_frame(gif)) {
         if (d->vi.numFrames == 0) {
             for (int i = 0; i < gif->palette->size; i++) {
@@ -274,11 +281,28 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
         d->vi.numFrames++;
     }
     delete[] buf;
-    delay_sum = static_cast<uint64_t>(
-        delay_sum / static_cast<double>(d->vi.numFrames) + 0.5);
-    int64_t divisor = gcd(delay_sum);
-    d->vi.fpsNum = 100 / divisor;
-    d->vi.fpsDen = delay_sum / divisor;
+    if (delay_sum == 0) {
+        cerr << "All frame durations are 0, defaulting to 10FPS" << endl;
+        d->vi.fpsNum = 10;
+        d->vi.fpsDen = 1;
+    } else {
+        double average = (delay_sum / static_cast<double>(d->vi.numFrames));
+        if (average > 3.28 && average < 3.38) {
+            d->vi.fpsNum = 30000;
+            d->vi.fpsDen = 1001;
+        } else if (average > 4.09 && average < 4.25) {
+            d->vi.fpsNum = 24000;
+            d->vi.fpsDen = 1001;
+        } else if (average > 1.65 && average < 1.68) {
+            d->vi.fpsNum = 60000;
+            d->vi.fpsDen = 1001;
+        } else {
+            delay_sum /= d->vi.numFrames;
+            int64_t divisor = gcd(delay_sum);
+            d->vi.fpsNum = 100 / divisor;
+            d->vi.fpsDen = delay_sum / divisor;
+        }
+    }
 
     gd_close_gif(gif);
 
