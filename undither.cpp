@@ -3,7 +3,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <iostream>
 #include <iterator>
 #include <unordered_map>
 #include <unordered_set>
@@ -15,12 +14,6 @@
 
 using namespace std;
 
-struct rgb {
-    uint8_t r, g, b;
-};
-struct rgb_sum {
-    uint32_t r, g, b, a;
-};
 struct prgb {
     prgb(uint16_t r1, uint16_t g1, uint16_t b1) : r(r1), g(g1), b(b1) {}
 
@@ -36,98 +29,106 @@ struct prgb {
 
     uint16_t r, g, b;
 };
-/*
-struct Frame {
-
-    uint16_t fx, fy, fw, fh;
-    uint32_t *indices;
-};*/
 
 struct UnditherData {
     VSVideoInfo vi;
-    int height, width;
+    int height, width, pixels;
     vector<prgb> *palette;
     vector<uint32_t *> *frames;
 };
 
-inline static unsigned int pal_diff(prgb p1, prgb p2) {
-    return (p1.r - p2.r) * (p1.r - p2.r) + (p1.g - p2.g) * (p1.g - p2.g) +
-           (p1.b - p2.b) * (p1.b - p2.b);
-}
-
-inline static uint8_t similarity(const uint32_t c1, const uint32_t c2,
-                                 const vector<prgb> *palette,
-                                 unordered_set<uint32_t> &localpal,
-                                 unordered_map<uint64_t, uint8_t> &simcache) {
-    const uint64_t pos = c1 < c2 ? (static_cast<uint64_t>(c1) << 32) | c2
-                                 : (static_cast<uint64_t>(c2) << 32) | c1;
-    auto search = simcache.find(pos);
-    if (search != simcache.end()) return search->second;
-
-    const prgb p1 = (*palette)[c1];
-    const prgb p2 = (*palette)[c2];
-    const prgb avg((p1.r + p2.r) / 2, (p1.g + p2.g) / 2, (p1.b + p2.b) / 2);
-
-    // cout << avg.r << " " << avg.g << " " << avg.b << endl;
-
-    const unsigned int allowed_diff = pal_diff(avg, p1);
-    unsigned int min_diff = 1 << 31;
-
-    // cout << c1 << " " << c2 << " " << endl;
-
-    for (const auto &i : localpal) {
-        if (i == c1 || i == c2) continue;
-        unsigned int diff = pal_diff(avg, (*palette)[i]);
-        if (diff < min_diff) min_diff = diff;
+class Acc {
+   public:
+    Acc(vector<prgb> *pal, uint32_t *frame, int pixels) : palette(pal) {
+        for (int i = 0; i < pixels; i++) {
+            localpal.insert(frame[i]);
+        }
     }
 
-    if (min_diff >= allowed_diff * 2) {
-        simcache[pos] = 8;
-        return 8;
+    void add_center(uint32_t cent) {
+        center = cent;
+        cpal = (*palette)[center];
+        r = cpal.r * center_w;
+        g = cpal.g * center_w;
+        b = cpal.b * center_w;
+        a = 255 * center_w;
     }
-    if (min_diff >= allowed_diff) {
-        simcache[pos] = 6;
-        return 6;
-    }
-    if (min_diff * 2 >= allowed_diff) {
-        simcache[pos] = 2;
-        return 2;
-    }
-    simcache[pos] = 0;
-    return 0;
-}
 
-inline static void add_to_acc(rgb_sum *acc, const uint32_t center,
-                              const uint32_t idx, const vector<prgb> *palette,
-                              unordered_set<uint32_t> &localpal,
-                              unordered_map<uint64_t, uint8_t> &simcache,
-                              uint8_t w) {
-    uint8_t sim = similarity(center, idx, palette, localpal, simcache);
-    if (sim) {
-        w *= sim;
-        w *= 255;
-        prgb c = (*palette)[idx];
-        acc->r += c.r * w;
-        acc->g += c.g * w;
-        acc->b += c.b * w;
-        acc->a += 255 * w;
+    void add(const uint32_t idx, uint8_t w) {
+        uint8_t sim = similarity(idx);
+        if (sim) {
+            w *= sim;
+            w *= 255;
+            prgb c = (*palette)[idx];
+            r += c.r * w;
+            g += c.g * w;
+            b += c.b * w;
+            a += 255 * w;
+        }
     }
-}
+
+    uint32_t r, g, b, a;
+
+   private:
+    unordered_set<uint32_t> localpal;
+    unordered_map<uint64_t, uint8_t> simcache;
+    const vector<prgb> *palette;
+    static const int center_w = 8 * 255;
+    uint32_t center;
+    prgb cpal = {0, 0, 0};
+
+    inline uint8_t similarity(const uint32_t c2) {
+        const uint64_t pos = center < c2
+                                 ? (static_cast<uint64_t>(center) << 32) | c2
+                                 : (static_cast<uint64_t>(c2) << 32) | center;
+        auto search = simcache.find(pos);
+        if (search != simcache.end()) return search->second;
+
+        const prgb p2 = (*palette)[c2];
+        const prgb avg((cpal.r + p2.r) / 2, (cpal.g + p2.g) / 2,
+                       (cpal.b + p2.b) / 2);
+
+        const unsigned int allowed_diff = pal_diff(avg, cpal);
+        unsigned int min_diff = 1 << 31;
+
+        for (const auto &i : localpal) {
+            if (i == center || i == c2) continue;
+            unsigned int diff = pal_diff(avg, (*palette)[i]);
+            if (diff < min_diff) min_diff = diff;
+        }
+
+        if (min_diff >= allowed_diff * 2) {
+            simcache[pos] = 6;
+            return 6;
+        }
+        if (min_diff >= allowed_diff) {
+            simcache[pos] = 4;
+            return 4;
+        }
+        if (min_diff * 2 >= allowed_diff) {
+            simcache[pos] = 1;
+            return 1;
+        }
+        simcache[pos] = 0;
+        return 0;
+    }
+
+    inline uint32_t pal_diff(prgb p1, prgb p2) {
+        return (p1.r - p2.r) * (p1.r - p2.r) + (p1.g - p2.g) * (p1.g - p2.g) +
+               (p1.b - p2.b) * (p1.b - p2.b);
+    }
+};
 
 static void VS_CC unditherInit(VSMap *in, VSMap *out, void **instanceData,
                                VSNode *node, VSCore *core, const VSAPI *vsapi) {
-    UnditherData *d = (UnditherData *)*instanceData;
+    UnditherData *d = static_cast<UnditherData *>(*instanceData);
     vsapi->setVideoInfo(&d->vi, 1, node);
 }
 
 static const VSFrameRef *VS_CC unditherGetFrame(
     int n, int activationReason, void **instanceData, void **frameData,
     VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
-    // if (activationReason != arInitial) return nullptr;
-
-    UnditherData *d = (UnditherData *)*instanceData;
-    unordered_map<uint64_t, uint8_t> simcache;
-    unordered_set<uint32_t> localpal;
+    UnditherData *d = static_cast<UnditherData *>(*instanceData);
 
     VSFrameRef *dst =
         vsapi->newVideoFrame(d->vi.format, d->width, d->height, 0, core);
@@ -138,53 +139,30 @@ static const VSFrameRef *VS_CC unditherGetFrame(
 
     uint32_t *frame = (*d->frames)[n];
 
-    for (int i = 0; i < d->width * d->height; i++) {
-        localpal.insert(frame[i]);
-    }
-
-    static const int center_w = 8 * 255;
+    Acc acc(d->palette, frame, d->pixels);
 
     for (int y = 0; y < d->height; y++) {
         for (int x = 0; x < d->width; x++) {
             int ind = (d->width * y) + x;
             int ind2 = (stride * y) + x;
 
-            const uint32_t center = frame[ind];
-            const prgb cpal = (*d->palette)[center];
-            // cout << cpal.r << " " << cpal.g << " " << cpal.b << endl;
-            rgb_sum acc = {.r = static_cast<uint32_t>(cpal.r * center_w),
-                           .g = static_cast<uint32_t>(cpal.g * center_w),
-                           .b = static_cast<uint32_t>(cpal.b * center_w),
-                           .a = 255 * center_w};
+            acc.add_center(frame[ind]);
 
             if (y > 0) {
-                if (x > 0)
-                    add_to_acc(&acc, center, frame[ind - d->width - 1],
-                               d->palette, localpal, simcache, 1);
-                add_to_acc(&acc, center, frame[ind - d->width], d->palette,
-                           localpal, simcache, 2);
-                if (x < d->width - 1)
-                    add_to_acc(&acc, center, frame[ind - d->width + 1],
-                               d->palette, localpal, simcache, 1);
+                if (x > 0) acc.add(frame[ind - d->width - 1], 1);
+                acc.add(frame[ind - d->width], 2);
+                if (x < d->width - 1) acc.add(frame[ind - d->width + 1], 1);
             }
 
-            if (x > 0)
-                add_to_acc(&acc, center, frame[ind - 1], d->palette, localpal,
-                           simcache, 2);
+            if (x > 0) acc.add(frame[ind - 1], 2);
             if (x < d->width - 1)
-                add_to_acc(&acc, center, frame[ind + 1], d->palette, localpal,
-                           simcache, 3);  // floyd-steinberg
+                acc.add(frame[ind + 1], 3);  // floyd-steinberg
 
             if (y < d->height - 1) {
                 if (x > 0)
-                    add_to_acc(&acc, center, frame[ind + d->width - 1],
-                               d->palette, localpal, simcache,
-                               2);  // floyd-steinberg
-                add_to_acc(&acc, center, frame[ind + d->width], d->palette,
-                           localpal, simcache, 2);
-                if (x < d->width - 1)
-                    add_to_acc(&acc, center, frame[ind + d->width + 1],
-                               d->palette, localpal, simcache, 1);
+                    acc.add(frame[ind + d->width - 1], 2);  // floyd-steinberg
+                acc.add(frame[ind + d->width], 2);
+                if (x < d->width - 1) acc.add(frame[ind + d->width + 1], 1);
             }
 
             if (acc.a) {
@@ -206,7 +184,10 @@ static void VS_CC unditherFree(void *instanceData, VSCore *core,
                                const VSAPI *vsapi) {
     UnditherData *d = (UnditherData *)instanceData;
 
-    free(d);
+    delete d->palette;
+    for (auto &frame : *d->frames) delete[] frame;
+    delete d->frames;
+    delete d;
 }
 
 static int64_t gcd(int64_t m) {
@@ -224,21 +205,22 @@ static int64_t gcd(int64_t m) {
 
 static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
                                  VSCore *core, const VSAPI *vsapi) {
-    UnditherData *d = (UnditherData *)calloc(sizeof(UnditherData), 1);
+    unique_ptr<UnditherData> d(new UnditherData);
 
     gd_GIF *gif = gd_open_gif(vsapi->propGetData(in, "path", 0, 0));
     d->vi.format = vsapi->getFormatPreset(pfRGB24, core);
     d->width = d->vi.width = gif->width;
     d->height = d->vi.height = gif->height;
+    d->pixels = d->width * d->height;
 
     int64_t delay_sum = 0;
 
     d->palette = new vector<prgb>;
     d->frames = new vector<uint32_t *>;
 
-    uint32_t *buf = new uint32_t[d->width * d->height];
-    if (gif->bgindex) memset(buf, gif->bgindex, d->width * d->height);
-
+    uint32_t *buf = new uint32_t[d->pixels];
+    if (gif->bgindex)
+        memset(buf, static_cast<uint32_t>(gif->bgindex), d->pixels);
     while (gd_get_frame(gif)) {
         if (d->vi.numFrames == 0) {
             for (int i = 0; i < gif->palette->size; i++) {
@@ -267,29 +249,31 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
                     if (it2 == d->palette->end()) {
                         d->palette->push_back(cmp);
                         remap[i] = d->palette->size() - 1;
-                    } else {
+                    } else
                         remap[i] = distance(d->palette->begin(), it2);
-                    }
                 }
             }
-            uint8_t ind;
+
             for (int y = 0; y < gif->fh; y++) {
                 for (int x = 0; x < gif->fw; x++) {
-                    ind = gif->frame[(gif->fy + y) * gif->width + gif->fx + x];
+                    uint8_t ind =
+                        gif->frame[(gif->fy + y) * gif->width + gif->fx + x];
                     if (ind != gif->gce.tindex)
                         buf[(gif->fy + y) * gif->width + gif->fx + x] =
                             remap[ind];
                 }
             }
         }
-        uint32_t *buf2 = new uint32_t[d->width * d->height];
-        memcpy(buf2, buf, (d->width * d->height) * sizeof(uint32_t));
+        uint32_t *buf2 = new uint32_t[d->pixels];
+        memcpy(buf2, buf, (d->pixels) * sizeof(uint32_t));
         d->frames->push_back(buf2);
 
         delay_sum += gif->gce.delay;
         d->vi.numFrames++;
     }
-    delay_sum = (delay_sum / d->vi.numFrames) + 0.5;
+    delete[] buf;
+    delay_sum = static_cast<uint64_t>(
+        delay_sum / static_cast<double>(d->vi.numFrames) + 0.5);
     int64_t divisor = gcd(delay_sum);
     d->vi.fpsNum = 100 / divisor;
     d->vi.fpsDen = delay_sum / divisor;
@@ -297,7 +281,8 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
     gd_close_gif(gif);
 
     vsapi->createFilter(in, out, "Undither", unditherInit, unditherGetFrame,
-                        unditherFree, fmParallel, 0, d, core);
+                        unditherFree, fmParallel, 0, d.get(), core);
+    d.release();
 }
 
 VS_EXTERNAL_API(void)
