@@ -73,7 +73,7 @@ class Acc {
     unordered_set<uint32_t> localpal;
     unordered_map<uint64_t, uint8_t> simcache;
     const vector<prgb> *palette;
-    static const int center_w = 8 * 255;
+    static const int center_w = 6 * 255;
     uint32_t center;
     prgb cpal = {0, 0, 0};
 
@@ -98,16 +98,16 @@ class Acc {
         }
 
         if (min_diff >= allowed_diff * 2) {
+            simcache[pos] = 7;
+            return 7;
+        }
+        if (min_diff >= allowed_diff) {
             simcache[pos] = 6;
             return 6;
         }
-        if (min_diff >= allowed_diff) {
-            simcache[pos] = 4;
-            return 4;
-        }
         if (min_diff * 2 >= allowed_diff) {
-            simcache[pos] = 1;
-            return 1;
+            simcache[pos] = 3;
+            return 3;
         }
         simcache[pos] = 0;
         return 0;
@@ -209,6 +209,7 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
 
     gd_GIF *gif = gd_open_gif(vsapi->propGetData(in, "path", 0, 0));
     d->vi.format = vsapi->getFormatPreset(pfRGB24, core);
+    d->vi.numFrames = 0;
     d->width = d->vi.width = gif->width;
     d->height = d->vi.height = gif->height;
     d->pixels = d->width * d->height;
@@ -221,6 +222,7 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
     uint32_t *buf = new uint32_t[d->pixels];
     if (gif->bgindex)
         memset(buf, static_cast<uint32_t>(gif->bgindex), d->pixels);
+
     while (gd_get_frame(gif)) {
         if (d->vi.numFrames == 0) {
             for (int i = 0; i < gif->palette->size; i++) {
