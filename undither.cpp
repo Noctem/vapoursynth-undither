@@ -1,31 +1,37 @@
+#include <gif_lib.h>
 #include <vapoursynth/VapourSynth.h>
 
 #include <algorithm>
+#include <climits>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
-#include "gifdec.h"
-
 using namespace std;
+
+using IndexInt = uint16_t;
 
 struct prgb {
     prgb(uint16_t r1, uint16_t g1, uint16_t b1) : r(r1), g(g1), b(b1) {}
 
-    prgb(uint8_t *p) {
-        r = *p++ * 255;
-        g = *p++ * 255;
-        b = *p * 255;
+    prgb(GifColorType color) {
+        r = color.Red * 255;
+        g = color.Green * 255;
+        b = color.Blue * 255;
     }
 
+    bool isBlack() { return (r == 0 && g == 0 && b == 0); }
+
     bool operator==(const prgb &p2) {
-        return ((r == p2.r) && (g == p2.g) && (b == p2.b));
+        return (r == p2.r && g == p2.g && b == p2.b);
     }
 
     uint16_t r, g, b;
@@ -35,18 +41,20 @@ struct UnditherData {
     VSVideoInfo vi;
     int height, width, pixels;
     vector<prgb> *palette;
-    vector<uint32_t *> *frames;
+    vector<IndexInt *> *frames;
 };
 
 class Acc {
    public:
-    Acc(vector<prgb> *pal, uint32_t *frame, int pixels) : palette(pal) {
-        for (int i = 0; i < pixels; i++) {
-            localpal.insert(frame[i]);
+    Acc(vector<prgb> *pal, IndexInt *frame, int pixels) : palette(pal) {
+        if (pal->size() <= 256) {
+            for (IndexInt i = 0; i < pal->size(); i++) localpal.insert(i);
+        } else {
+            for (int i = 0; i < pixels; i++) localpal.insert(frame[i]);
         }
     }
 
-    void add_center(uint32_t cent) {
+    void add_center(IndexInt cent) {
         center = cent;
         cpal = (*palette)[center];
         r = cpal.r * center_w;
@@ -55,7 +63,7 @@ class Acc {
         a = 255 * center_w;
     }
 
-    void add(const uint32_t idx, uint8_t w) {
+    void add(const IndexInt idx, uint8_t w) {
         uint8_t sim = similarity(idx);
         if (sim) {
             w *= sim;
@@ -71,14 +79,14 @@ class Acc {
     uint32_t r, g, b, a;
 
    private:
-    unordered_set<uint32_t> localpal;
+    unordered_set<IndexInt> localpal;
     unordered_map<uint64_t, uint8_t> simcache;
     const vector<prgb> *palette;
     static const int center_w = 6 * 255;
-    uint32_t center;
+    IndexInt center;
     prgb cpal = {0, 0, 0};
 
-    inline uint8_t similarity(const uint32_t c2) {
+    inline uint8_t similarity(const IndexInt c2) {
         const uint64_t pos = center < c2
                                  ? (static_cast<uint64_t>(center) << 32) | c2
                                  : (static_cast<uint64_t>(c2) << 32) | center;
@@ -138,7 +146,7 @@ static const VSFrameRef *VS_CC unditherGetFrame(
     uint8_t *gp = vsapi->getWritePtr(dst, 1);
     uint8_t *bp = vsapi->getWritePtr(dst, 2);
 
-    uint32_t *frame = (*d->frames)[n];
+    IndexInt *frame = (*d->frames)[n];
 
     Acc acc(d->palette, frame, d->pixels);
 
@@ -204,89 +212,195 @@ static int64_t gcd(int64_t m) {
     return m;
 }
 
+static void throwError(VSMap *out, const VSAPI *vsapi, int errorCode) {
+    switch (errorCode) {
+        case D_GIF_ERR_OPEN_FAILED:
+            vsapi->setError(out, "Undither: failed to open GIF file");
+            return;
+        case D_GIF_ERR_READ_FAILED:
+            vsapi->setError(out, "Undither: error reading GIF file");
+            return;
+        case D_GIF_ERR_NOT_GIF_FILE:
+            vsapi->setError(out, "Undither: input is not a GIF file");
+            return;
+        case D_GIF_ERR_NO_SCRN_DSCR:
+            vsapi->setError(out, "Undither: no screen description in GIF file");
+            return;
+        case D_GIF_ERR_NO_IMAG_DSCR:
+            vsapi->setError(out, "Undither: missing image description in file");
+            return;
+        case D_GIF_ERR_NO_COLOR_MAP:
+            vsapi->setError(out, "Undither: file has no color map");
+            return;
+        case D_GIF_ERR_WRONG_RECORD:
+            vsapi->setError(out, "Undither: error, wrong record");
+            return;
+        case D_GIF_ERR_DATA_TOO_BIG:
+            vsapi->setError(out, "Undither: error, data too big");
+            return;
+        case D_GIF_ERR_NOT_ENOUGH_MEM:
+            vsapi->setError(out, "Undither: error, not enough memory");
+            return;
+        case D_GIF_ERR_CLOSE_FAILED:
+            vsapi->setError(out, "Undither: error, closing failed");
+            return;
+        case D_GIF_ERR_NOT_READABLE:
+            vsapi->setError(out, "Undither: error, not readable");
+            return;
+        case D_GIF_ERR_IMAGE_DEFECT:
+            vsapi->setError(out, "Undither: error, image defect");
+            return;
+        case D_GIF_ERR_EOF_TOO_SOON:
+            vsapi->setError(out, "Undither: error, EOF too soon");
+            return;
+        default:
+            vsapi->setError(out, "Undither: unknown error");
+            return;
+    }
+}
+
 static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
                                  VSCore *core, const VSAPI *vsapi) {
     unique_ptr<UnditherData> d(new UnditherData);
 
-    gd_GIF *gif = gd_open_gif(vsapi->propGetData(in, "path", 0, 0));
+    int err = D_GIF_SUCCEEDED;
+
+    GifFileType *gif =
+        DGifOpenFileName(vsapi->propGetData(in, "path", 0, 0), &err);
 
     if (gif == nullptr) {
-        vsapi->setError(out, "Undither: failed to open GIF file");
+        throwError(out, vsapi, err);
         return;
     }
 
     d->vi.format = vsapi->getFormatPreset(pfRGB24, core);
-    d->vi.numFrames = 0;
-    d->width = d->vi.width = gif->width;
-    d->height = d->vi.height = gif->height;
+    d->width = d->vi.width = gif->SWidth;
+    d->height = d->vi.height = gif->SHeight;
     d->pixels = d->width * d->height;
 
-    int64_t delay_sum = 0;
+    int64_t delaySum = 0;
+    int delayCount = 0;
 
     d->palette = new vector<prgb>;
-    d->frames = new vector<uint32_t *>;
+    d->frames = new vector<IndexInt *>;
 
-    uint32_t *buf = new uint32_t[d->pixels]();
-    if (gif->bgindex) {
-        for (int i = 0; i < d->pixels; i++) buf[i] = gif->bgindex;
+    IndexInt canvas[d->pixels];
+    fill(canvas, canvas + d->pixels, gif->SBackGroundColor);
+
+    IndexInt globalRemap[gif->SColorMap->ColorCount];
+    IndexInt localRemap[256];
+    IndexInt *remap;
+
+    // load global color map into palette
+    if (gif->SColorMap != nullptr) {
+        for (int i = 0; i < gif->SColorMap->ColorCount; i++) {
+            d->palette->emplace_back(gif->SColorMap->Colors[i]);
+            globalRemap[i] = i;
+        }
+        // remove redundant black pixels from end
+        while (d->palette->back().isBlack()) d->palette->pop_back();
+        int ind = d->palette->size();
+        if (ind != gif->SColorMap->ColorCount) {
+            fill(globalRemap + ind, globalRemap + gif->SColorMap->ColorCount,
+                 ind);
+            d->palette->emplace_back(0, 0, 0);
+        }
     }
-    while (gd_get_frame(gif)) {
-        if (d->vi.numFrames == 0) {
-            for (int i = 0; i < gif->palette->size; i++) {
-                d->palette->emplace_back(&gif->palette->colors[i * 3]);
-            }
-            for (int y = 0; y < gif->fh; y++) {
-                for (int x = 0; x < gif->fw; x++) {
-                    int ind =
-                        gif->frame[(gif->fy + y) * gif->width + gif->fx + x];
-                    if (ind != gif->gce.tindex)
-                        buf[(gif->fy + y) * gif->width + gif->fx + x] = ind;
-                }
-            }
-        } else {
-            uint32_t remap[gif->palette->size];
-            auto it = d->palette->begin();
-            for (int i = 0; i < gif->palette->size; i++) {
-                if (i == gif->gce.tindex) continue;
 
-                prgb cmp(gif->palette->colors + (i * 3));
-                if (cmp == *it++)
-                    remap[i] = i;
-                else {
-                    auto it2 =
-                        find(d->palette->begin(), d->palette->end(), cmp);
-                    if (it2 == d->palette->end()) {
-                        d->palette->push_back(cmp);
-                        remap[i] = d->palette->size() - 1;
-                    } else
-                        remap[i] = distance(d->palette->begin(), it2);
-                }
-            }
+    if (DGifSlurp(gif) == GIF_ERROR) {
+        throwError(out, vsapi, gif->Error);
+        DGifCloseFile(gif, &err);
+        return;
+    }
 
-            for (int y = 0; y < gif->fh; y++) {
-                for (int x = 0; x < gif->fw; x++) {
-                    uint8_t ind =
-                        gif->frame[(gif->fy + y) * gif->width + gif->fx + x];
-                    if (ind != gif->gce.tindex)
-                        buf[(gif->fy + y) * gif->width + gif->fx + x] =
-                            remap[ind];
+    d->vi.numFrames = gif->ImageCount;
+
+    for (int i = 0; i < gif->ImageCount; i++) {
+        SavedImage *sp = gif->SavedImages + i;
+
+        int disposal = DISPOSAL_UNSPECIFIED;
+        int transparentIndex = -1;
+
+        for (int j = 0; j < sp->ExtensionBlockCount; j++) {
+            if (sp->ExtensionBlocks[j].Function == GRAPHICS_EXT_FUNC_CODE) {
+                GraphicsControlBlock gcb;
+                if (DGifExtensionToGCB(sp->ExtensionBlocks[j].ByteCount,
+                                       sp->ExtensionBlocks[j].Bytes,
+                                       &gcb) == GIF_OK) {
+                    disposal = gcb.DisposalMode;
+                    transparentIndex = gcb.TransparentColor;
+                    delaySum += gcb.DelayTime;
+                    delayCount++;
+                    break;
                 }
             }
         }
-        uint32_t *buf2 = new uint32_t[d->pixels];
-        memcpy(buf2, buf, (d->pixels) * sizeof(uint32_t));
-        d->frames->push_back(buf2);
 
-        delay_sum += gif->gce.delay;
-        d->vi.numFrames++;
+        if (sp->ImageDesc.ColorMap != nullptr) {
+            remap = localRemap;
+            for (int j = 0; j < sp->ImageDesc.ColorMap->ColorCount; j++) {
+                if (j == transparentIndex) continue;
+
+                prgb cmp(sp->ImageDesc.ColorMap->Colors[j]);
+
+                auto it = find(d->palette->begin(), d->palette->end(), cmp);
+                if (it == d->palette->end()) {
+                    d->palette->push_back(cmp);
+                    remap[j] = d->palette->size() - 1;
+                } else
+                    remap[j] = distance(d->palette->begin(), it);
+            }
+        } else
+            remap = globalRemap;
+
+        if (d->palette->size() > USHRT_MAX) {
+            vsapi->setError(out,
+                            "Undither: combined palette size is larger than "
+                            "unsigned short, recompile with larger IndexInt.");
+            DGifCloseFile(gif, &err);
+            return;
+        }
+
+        for (int y = 0; y < sp->ImageDesc.Height; y++) {
+            int pos = (sp->ImageDesc.Top + y) * d->width;
+            for (int x = 0; x < sp->ImageDesc.Width; x++) {
+                GifByteType ind = sp->RasterBits[y * sp->ImageDesc.Width + x];
+                if (ind == transparentIndex) {
+                    switch (disposal) {
+                        case DISPOSE_BACKGROUND:
+                            canvas[pos + sp->ImageDesc.Left + x] =
+                                gif->SBackGroundColor;
+                            break;
+                        case DISPOSE_PREVIOUS:
+                            if (i >= 2)
+                                canvas[pos + sp->ImageDesc.Left + x] =
+                                    (*d->frames)[i - 2]
+                                                [pos + sp->ImageDesc.Left + x];
+                            break;
+                        default:
+                            break;
+                    }
+                } else {
+                    canvas[pos + sp->ImageDesc.Left + x] = remap[ind];
+                }
+            }
+        }
+        IndexInt *frame = new IndexInt[d->pixels];
+        copy(canvas, canvas + d->pixels, frame);
+        d->frames->push_back(frame);
     }
-    delete[] buf;
-    if (delay_sum == 0) {
-        cerr << "All frame durations are 0, defaulting to 10FPS" << endl;
+
+    DGifCloseFile(gif, &err);
+    if (err) cerr << "error closing file" << endl;
+
+    cout << "Combined palette size: " << d->palette->size() << endl;
+
+    if (delaySum == 0) {
+        cerr << "No frame durations found, defaulting to 10FPS" << endl;
         d->vi.fpsNum = 10;
         d->vi.fpsDen = 1;
     } else {
-        double average = (delay_sum / static_cast<double>(d->vi.numFrames));
+        double average = (delaySum / static_cast<double>(d->vi.numFrames));
         if (average > 3.28 && average < 3.38) {
             d->vi.fpsNum = 30000;
             d->vi.fpsDen = 1001;
@@ -297,18 +411,15 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
             d->vi.fpsNum = 60000;
             d->vi.fpsDen = 1001;
         } else {
-            delay_sum /= d->vi.numFrames;
-            int64_t divisor = gcd(delay_sum);
+            delaySum /= d->vi.numFrames;
+            int64_t divisor = gcd(delaySum);
             d->vi.fpsNum = 100 / divisor;
-            d->vi.fpsDen = delay_sum / divisor;
+            d->vi.fpsDen = delaySum / divisor;
         }
     }
 
-    gd_close_gif(gif);
-
     vsapi->createFilter(in, out, "Undither", unditherInit, unditherGetFrame,
-                        unditherFree, fmParallel, 0, d.get(), core);
-    d.release();
+                        unditherFree, fmParallel, 0, d.release(), core);
 }
 
 VS_EXTERNAL_API(void)

@@ -3,8 +3,11 @@ project('undither', 'cpp',
     meson_version: '>=0.46.0',
     version: '0.1')
 
+vapoursynth = dependency('vapoursynth').partial_dependency(compile_args: true, includes: true)
+gif = dependency('gif', version : '>=5.0')
+
 shared_module('undither',
-    sources: ['undither.cpp', 'gifdec.cpp'],
-    dependencies: dependency('vapoursynth').partial_dependency(compile_args: true, includes: true),
+    sources: ['undither.cpp'],
+    dependencies: [vapoursynth, gif],
     cpp_args: ['-march=native', '-Ofast'],
     install: true)
