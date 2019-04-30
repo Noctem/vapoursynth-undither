@@ -19,34 +19,39 @@ using namespace std;
 
 using IndexInt = uint16_t;
 
-struct prgb {
-    prgb(uint16_t r1, uint16_t g1, uint16_t b1) : r(r1), g(g1), b(b1) {}
+struct rgb {
+    rgb(GifByteType r1, GifByteType g1, GifByteType b1) : r(r1), g(g1), b(b1) {}
 
-    prgb(GifColorType color) {
-        r = color.Red * 255;
-        g = color.Green * 255;
-        b = color.Blue * 255;
+    rgb(GifColorType color) {
+        r = color.Red;
+        g = color.Green;
+        b = color.Blue;
     }
 
-    bool isBlack() { return (r == 0 && g == 0 && b == 0); }
+    bool isBlack() const { return (r == 0 && g == 0 && b == 0); }
 
-    bool operator==(const prgb &p2) {
+    bool operator==(const rgb &p2) const {
         return (r == p2.r && g == p2.g && b == p2.b);
     }
 
-    uint16_t r, g, b;
+    uint32_t operator-(const rgb &p2) const {
+        return (r - p2.r) * (r - p2.r) + (g - p2.g) * (g - p2.g) +
+               (b - p2.b) * (b - p2.b);
+    }
+
+    GifByteType r, g, b;
 };
 
 struct UnditherData {
     VSVideoInfo vi;
     int height, width, pixels;
-    vector<prgb> *palette;
+    vector<rgb> *palette;
     vector<IndexInt *> *frames;
 };
 
 class Acc {
    public:
-    Acc(vector<prgb> *pal, IndexInt *frame, int pixels) : palette(pal) {
+    Acc(vector<rgb> *pal, IndexInt *frame, int pixels) : palette(pal) {
         if (pal->size() <= 256) {
             for (IndexInt i = 0; i < pal->size(); i++) localpal.insert(i);
         } else {
@@ -60,71 +65,63 @@ class Acc {
         r = cpal.r * center_w;
         g = cpal.g * center_w;
         b = cpal.b * center_w;
-        a = 255 * center_w;
+        weight = center_w;
     }
 
     void add(const IndexInt idx, uint8_t w) {
         uint8_t sim = similarity(idx);
         if (sim) {
             w *= sim;
-            w *= 255;
-            prgb c = (*palette)[idx];
+            rgb c = (*palette)[idx];
             r += c.r * w;
             g += c.g * w;
             b += c.b * w;
-            a += 255 * w;
+            weight += w;
         }
     }
 
-    uint32_t r, g, b, a;
+    uint32_t r, g, b, weight;
 
    private:
     unordered_set<IndexInt> localpal;
-    unordered_map<uint64_t, uint8_t> simcache;
-    const vector<prgb> *palette;
-    static const int center_w = 6 * 255;
+    unordered_map<uint32_t, uint8_t> simcache;
+    const vector<rgb> *palette;
+    static const int center_w = 8;
     IndexInt center;
-    prgb cpal = {0, 0, 0};
+    rgb cpal = {0, 0, 0};
 
-    inline uint8_t similarity(const IndexInt c2) {
-        const uint64_t pos = center < c2
-                                 ? (static_cast<uint64_t>(center) << 32) | c2
-                                 : (static_cast<uint64_t>(c2) << 32) | center;
+    inline uint32_t similarity(const IndexInt c2) {
+        const uint32_t pos = center < c2
+                                 ? (static_cast<uint32_t>(center) << 16) | c2
+                                 : (static_cast<uint32_t>(c2) << 16) | center;
         auto search = simcache.find(pos);
         if (search != simcache.end()) return search->second;
 
-        const prgb p2 = (*palette)[c2];
-        const prgb avg((cpal.r + p2.r) / 2, (cpal.g + p2.g) / 2,
-                       (cpal.b + p2.b) / 2);
+        const rgb p2 = (*palette)[c2];
+        const rgb avg((cpal.r + p2.r) / 2, (cpal.g + p2.g) / 2,
+                      (cpal.b + p2.b) / 2);
 
-        const unsigned int allowed_diff = pal_diff(avg, cpal);
-        unsigned int min_diff = 1 << 31;
+        const uint32_t allowed_diff = avg - cpal;
+        uint32_t min_diff = 1 << 31;
 
         for (const auto &i : localpal) {
             if (i == center || i == c2) continue;
-            unsigned int diff = pal_diff(avg, (*palette)[i]);
+            uint32_t diff = avg - (*palette)[i];
             if (diff < min_diff) min_diff = diff;
         }
 
-        if (min_diff >= allowed_diff * 2) {
-            simcache[pos] = 7;
-            return 7;
-        }
-        if (min_diff >= allowed_diff) {
-            simcache[pos] = 6;
-            return 6;
-        }
-        if (min_diff * 2 >= allowed_diff) {
-            simcache[pos] = 3;
-            return 3;
-        }
-        simcache[pos] = 0;
-        return 0;
-    }
+        uint8_t sim;
+        if (min_diff >= allowed_diff * 2)
+            sim = 8;
+        else if (min_diff >= allowed_diff)
+            sim = 6;
+        else if (min_diff * 2 >= allowed_diff)
+            sim = 2;
+        else
+            sim = 0;
 
-    inline uint32_t pal_diff(prgb p1, prgb p2) {
-        return (p1.r - p2.r) * (p1.r - p2.r) + (p1.g - p2.g) * (p1.g - p2.g) +
-               (p1.b - p2.b) * (p1.b - p2.b);
+        simcache[pos] = sim;
+        return sim;
     }
 };
 
@@ -174,10 +171,10 @@ static const VSFrameRef *VS_CC unditherGetFrame(
                 if (x < d->width - 1) acc.add(frame[ind + d->width + 1], 1);
             }
 
-            if (acc.a) {
-                rp[ind2] = acc.r / acc.a;
-                gp[ind2] = acc.g / acc.a;
-                bp[ind2] = acc.b / acc.a;
+            if (acc.weight) {
+                rp[ind2] = acc.r / acc.weight;
+                gp[ind2] = acc.g / acc.weight;
+                bp[ind2] = acc.b / acc.weight;
             } else {
                 rp[ind2] = 0;
                 gp[ind2] = 0;
@@ -281,13 +278,13 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
     int64_t delaySum = 0;
     int delayCount = 0;
 
-    d->palette = new vector<prgb>;
+    d->palette = new vector<rgb>;
     d->frames = new vector<IndexInt *>;
 
     IndexInt canvas[d->pixels];
     fill(canvas, canvas + d->pixels, gif->SBackGroundColor);
 
-    IndexInt globalRemap[gif->SColorMap->ColorCount];
+    IndexInt globalRemap[256];
     IndexInt localRemap[256];
     IndexInt *remap;
 
@@ -301,10 +298,11 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
         while (d->palette->back().isBlack()) d->palette->pop_back();
         int ind = d->palette->size();
         if (ind != gif->SColorMap->ColorCount) {
-            fill(globalRemap + ind, globalRemap + gif->SColorMap->ColorCount,
-                 ind);
+            fill(globalRemap + ind, globalRemap + 256, ind);
             d->palette->emplace_back(0, 0, 0);
         }
+    } else {
+        fill(globalRemap, globalRemap + 256, 0);
     }
 
     if (DGifSlurp(gif) == GIF_ERROR) {
@@ -341,7 +339,7 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
             for (int j = 0; j < sp->ImageDesc.ColorMap->ColorCount; j++) {
                 if (j == transparentIndex) continue;
 
-                prgb cmp(sp->ImageDesc.ColorMap->Colors[j]);
+                rgb cmp(sp->ImageDesc.ColorMap->Colors[j]);
 
                 auto it = find(d->palette->begin(), d->palette->end(), cmp);
                 if (it == d->palette->end()) {
@@ -356,7 +354,7 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
         if (d->palette->size() > USHRT_MAX) {
             vsapi->setError(out,
                             "Undither: combined palette size is larger than "
-                            "unsigned short, recompile with larger IndexInt.");
+                            "uint16_t, recompile with larger IndexInt.");
             DGifCloseFile(gif, &err);
             return;
         }
@@ -392,8 +390,6 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
 
     DGifCloseFile(gif, &err);
     if (err) cerr << "error closing file" << endl;
-
-    cout << "Combined palette size: " << d->palette->size() << endl;
 
     if (delaySum == 0) {
         cerr << "No frame durations found, defaulting to 10FPS" << endl;
