@@ -103,7 +103,9 @@ class Acc {
 
 class LocalAcc : public Acc {
    public:
-    LocalAcc(vector<Palette> *palettes) : palettes(palettes) {}
+    LocalAcc(vector<Palette> *palettes, size_t size) : palettes(palettes) {
+        simcache.setSize(size);
+    }
 
     void add(const Pixel &pix, uint32_t w) {
         RGB color;
@@ -127,8 +129,6 @@ class LocalAcc : public Acc {
         weight = center_w;
         cHash = cent.hash();
     }
-
-    void setCacheSize(size_t s) { simcache.setSize(s); }
 
    private:
     inline uint32_t similarity(const Pixel &p2, RGB &c2) {
@@ -186,9 +186,9 @@ class LocalAcc : public Acc {
 
 class GlobalAcc : public Acc {
    public:
-    GlobalAcc(const Palette &pal) : palette(pal) {
-        fill(simcache.begin(), simcache.end(), -1);
-    }
+    static void wipeCache() { fill(simcache.begin(), simcache.end(), -1); }
+
+    static void setPalette(const Palette &pal) { palette = pal; }
 
     void add(const uint8_t pix, uint32_t w) {
         RGB color;
@@ -246,8 +246,8 @@ class GlobalAcc : public Acc {
         return sim;
     }
 
-    Palette palette;
-    array<char, 256 * 256> simcache;
+    static Palette palette;
+    static array<char, 256 * 256> simcache;
 };
 
 struct UnditherData {
@@ -257,13 +257,11 @@ struct UnditherData {
 
 struct GlobalData : UnditherData {
     vector<vector<uint8_t>> *frames;
-    GlobalAcc *acc;
 };
 
 struct LocalData : UnditherData {
     vector<vector<Pixel>> *frames;
     vector<Palette> *palettes;
-    LocalAcc *acc;
 };
 
 template <class D>
@@ -272,6 +270,15 @@ static void VS_CC unditherInit(VSMap *in, VSMap *out, void **instanceData,
     D *d = static_cast<D *>(*instanceData);
     vsapi->setVideoInfo(&d->vi, 1, node);
 }
+
+array<char, 256 * 256> GlobalAcc::simcache;
+Palette GlobalAcc::palette;
+
+LocalAcc *getAcc(LocalData *d) {
+    return new LocalAcc(d->palettes, (d->width + 3) * 8);
+}
+
+GlobalAcc *getAcc(GlobalData *d) { return new GlobalAcc(); }
 
 template <class A, class D>
 static const VSFrameRef *VS_CC unditherGetFrame(
@@ -287,7 +294,7 @@ static const VSFrameRef *VS_CC unditherGetFrame(
     uint8_t *bp = vsapi->getWritePtr(dst, 2);
 
     auto frame = (*d->frames)[n];
-    A acc = d->acc;
+    A acc = getAcc(d);
 
     for (int y = 0; y < d->height; y++) {
         for (int x = 0; x < d->width; x++) {
@@ -324,6 +331,7 @@ static const VSFrameRef *VS_CC unditherGetFrame(
             }
         }
     }
+    delete acc;
 
     return dst;
 }
@@ -332,7 +340,6 @@ static void VS_CC globalFree(void *instanceData, VSCore *core,
                              const VSAPI *vsapi) {
     GlobalData *d = (GlobalData *)instanceData;
 
-    delete d->acc;
     delete d->frames;
     delete d;
 }
@@ -341,7 +348,6 @@ static void VS_CC localFree(void *instanceData, VSCore *core,
                             const VSAPI *vsapi) {
     LocalData *d = (LocalData *)instanceData;
 
-    delete d->acc;
     delete d->palettes;
     delete d->frames;
     delete d;
@@ -415,8 +421,6 @@ static UnditherData *createLocal(Palette &global, GifFileType *gif,
 
     d->palettes = new vector<Palette>;
     d->palettes->push_back(move(global));
-    d->acc = new LocalAcc(d->palettes);
-    d->acc->setCacheSize((gif->SWidth + 2) * 8);
 
     uint8_t maxInd;
     uint16_t palInd;
@@ -510,7 +514,8 @@ static UnditherData *createLocal(Palette &global, GifFileType *gif,
 static UnditherData *createGlobal(Palette &global, GifFileType *gif,
                                   int64_t &delaySum, int &delayCount) {
     GlobalData *d = new GlobalData;
-    d->acc = new GlobalAcc(global);
+    GlobalAcc::wipeCache();
+    GlobalAcc::setPalette(global);
     d->frames = new vector<vector<uint8_t>>;
     d->frames->reserve(d->vi.numFrames);
 
@@ -648,7 +653,7 @@ static void VS_CC unditherCreate(const VSMap *in, VSMap *out, void *userData,
     DGifCloseFile(gif, &err);
     if (err) cerr << "error closing file" << endl;
 
-    if (delaySum == 0) {
+    if (delaySum < d->vi.numFrames) {
         cerr << "No frame durations found, defaulting to 10FPS" << endl;
         d->vi.fpsNum = 10;
         d->vi.fpsDen = 1;
