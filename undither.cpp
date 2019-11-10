@@ -13,6 +13,8 @@
 
 using namespace std;
 
+const int TRANSPARENT_BACKGROUND = 4;
+
 struct Pixel;
 struct RGB;
 using Palette = vector<RGB>;
@@ -425,6 +427,7 @@ static UnditherData *createLocal(Palette &global, GifFileType *gif,
     uint8_t maxInd;
     uint16_t palInd;
     int undisposed = 0;
+    Pixel bgColor;
 
     d->frames = new vector<vector<Pixel>>;
     d->frames->reserve(gif->ImageCount);
@@ -474,6 +477,15 @@ static UnditherData *createLocal(Palette &global, GifFileType *gif,
             maxInd = maxGlobalInd;
         }
 
+        if (disposal == DISPOSE_BACKGROUND) {
+            if (transparentIndex == gif->SBackGroundColor)
+                disposal = TRANSPARENT_BACKGROUND;
+            bgColor =
+                Pixel(gif->SBackGroundColor <= maxInd ? gif->SBackGroundColor
+                                                      : maxInd,
+                      palInd);
+        }
+
         int padding = gif->SWidth - sp->ImageDesc.Width - sp->ImageDesc.Left;
         uint8_t *bits = sp->RasterBits;
         auto it = canvas.begin();
@@ -484,7 +496,7 @@ static UnditherData *createLocal(Palette &global, GifFileType *gif,
                 uint8_t ind = *bits++;
                 if (ind == transparentIndex) {
                     if (disposal == DISPOSE_BACKGROUND)
-                        *it++ = Pixel(gif->SBackGroundColor <= maxInd ? gif->SBackGroundColor : maxInd, palInd);
+                        *it++ = bgColor;
                     else
                         it++;
                 } else {
@@ -498,6 +510,10 @@ static UnditherData *createLocal(Palette &global, GifFileType *gif,
             case DISPOSAL_UNSPECIFIED:
             case DISPOSE_DO_NOT:
                 undisposed = frameNum;
+                break;
+            case DISPOSE_BACKGROUND:
+            case TRANSPARENT_BACKGROUND:
+                fill(canvas.begin(), canvas.end(), bgColor);
                 break;
             case DISPOSE_PREVIOUS:
                 canvas = (*d->frames)[undisposed];
@@ -515,9 +531,12 @@ static UnditherData *createGlobal(Palette &global, GifFileType *gif,
     d->frames = new vector<vector<uint8_t>>;
     d->frames->reserve(d->vi.numFrames);
 
+    uint8_t maxInd = global.size() - 1;
+    uint8_t bgColor =
+        gif->SBackGroundColor <= maxInd ? gif->SBackGroundColor : maxInd;
+
     vector<uint8_t> canvas;
-    canvas.resize(gif->SWidth * gif->SHeight,
-                  static_cast<uint8_t>(gif->SBackGroundColor));
+    canvas.resize(gif->SWidth * gif->SHeight, bgColor);
     int undisposed = 0;
 
     for (int frameNum = 0; frameNum < gif->ImageCount; frameNum++) {
@@ -536,14 +555,14 @@ static UnditherData *createGlobal(Palette &global, GifFileType *gif,
                     transparentIndex = gcb.TransparentColor;
                     delaySum += gcb.DelayTime;
                     delayCount++;
+
+                    if (disposal == DISPOSE_BACKGROUND &&
+                        transparentIndex == gif->SBackGroundColor)
+                        disposal = TRANSPARENT_BACKGROUND;
                     break;
                 }
             }
         }
-
-        uint8_t maxInd = global.size() - 1;
-        uint8_t bgColor =
-            gif->SBackGroundColor <= maxInd ? gif->SBackGroundColor : maxInd;
 
         int padding = gif->SWidth - sp->ImageDesc.Width - sp->ImageDesc.Left;
         uint8_t *bits = sp->RasterBits;
@@ -569,6 +588,10 @@ static UnditherData *createGlobal(Palette &global, GifFileType *gif,
             case DISPOSAL_UNSPECIFIED:
             case DISPOSE_DO_NOT:
                 undisposed = frameNum;
+                break;
+            case DISPOSE_BACKGROUND:
+            case TRANSPARENT_BACKGROUND:
+                fill(canvas.begin(), canvas.end(), bgColor);
                 break;
             case DISPOSE_PREVIOUS:
                 canvas = (*d->frames)[undisposed];
