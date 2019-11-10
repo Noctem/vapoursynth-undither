@@ -424,6 +424,7 @@ static UnditherData *createLocal(Palette &global, GifFileType *gif,
 
     uint8_t maxInd;
     uint16_t palInd;
+    int undisposed = 0;
 
     d->frames = new vector<vector<Pixel>>;
     d->frames->reserve(gif->ImageCount);
@@ -435,7 +436,7 @@ static UnditherData *createLocal(Palette &global, GifFileType *gif,
         SavedImage *sp = gif->SavedImages + frameNum;
 
         int disposal = DISPOSAL_UNSPECIFIED;
-        int transparentIndex = -1;
+        int transparentIndex = NO_TRANSPARENT_COLOR;
 
         for (int i = 0; i < sp->ExtensionBlockCount; i++) {
             if (sp->ExtensionBlocks[i].Function == GRAPHICS_EXT_FUNC_CODE) {
@@ -482,24 +483,10 @@ static UnditherData *createLocal(Palette &global, GifFileType *gif,
             for (int x = 0; x < sp->ImageDesc.Width; x++) {
                 uint8_t ind = *bits++;
                 if (ind == transparentIndex) {
-                    switch (disposal) {
-                        case DISPOSE_BACKGROUND:
-                            *it++ = Pixel(gif->SBackGroundColor <= maxInd
-                                              ? gif->SBackGroundColor
-                                              : maxInd,
-                                          palInd);
-                            break;
-                        case DISPOSE_PREVIOUS:
-                            if (frameNum >= 2)
-                                *it++ = (*d->frames)[frameNum - 2]
-                                                    [(sp->ImageDesc.Top + y) *
-                                                         gif->SWidth +
-                                                     sp->ImageDesc.Left + x];
-                            break;
-                        default:
-                            it++;
-                            break;
-                    }
+                    if (disposal == DISPOSE_BACKGROUND)
+                        *it++ = Pixel(gif->SBackGroundColor <= maxInd ? gif->SBackGroundColor : maxInd, palInd);
+                    else
+                        it++;
                 } else {
                     *it++ = Pixel(ind <= maxInd ? ind : maxInd, palInd);
                 }
@@ -507,6 +494,15 @@ static UnditherData *createLocal(Palette &global, GifFileType *gif,
             it += padding;
         }
         d->frames->push_back(canvas);
+        switch (disposal) {
+            case DISPOSAL_UNSPECIFIED:
+            case DISPOSE_DO_NOT:
+                undisposed = frameNum;
+                break;
+            case DISPOSE_PREVIOUS:
+                canvas = (*d->frames)[undisposed];
+                break;
+        }
     }
     return d;
 }
@@ -522,12 +518,13 @@ static UnditherData *createGlobal(Palette &global, GifFileType *gif,
     vector<uint8_t> canvas;
     canvas.resize(gif->SWidth * gif->SHeight,
                   static_cast<uint8_t>(gif->SBackGroundColor));
+    int undisposed = 0;
 
     for (int frameNum = 0; frameNum < gif->ImageCount; frameNum++) {
         SavedImage *sp = gif->SavedImages + frameNum;
 
         int disposal = DISPOSAL_UNSPECIFIED;
-        int transparentIndex = -1;
+        int transparentIndex = NO_TRANSPARENT_COLOR;
 
         for (int i = 0; i < sp->ExtensionBlockCount; i++) {
             if (sp->ExtensionBlocks[i].Function == GRAPHICS_EXT_FUNC_CODE) {
@@ -557,21 +554,10 @@ static UnditherData *createGlobal(Palette &global, GifFileType *gif,
             for (int x = 0; x < sp->ImageDesc.Width; x++) {
                 uint8_t ind = *bits++;
                 if (ind == transparentIndex) {
-                    switch (disposal) {
-                        case DISPOSE_BACKGROUND:
-                            *it++ = bgColor;
-                            break;
-                        case DISPOSE_PREVIOUS:
-                            if (frameNum >= 2)
-                                *it++ = (*d->frames)[frameNum - 2]
-                                                    [(sp->ImageDesc.Top + y) *
-                                                         gif->SWidth +
-                                                     sp->ImageDesc.Left + x];
-                            break;
-                        default:
-                            it++;
-                            break;
-                    }
+                    if (disposal == DISPOSE_BACKGROUND)
+                        *it++ = bgColor;
+                    else
+                        it++;
                 } else {
                     *it++ = ind <= maxInd ? ind : maxInd;
                 }
@@ -579,6 +565,15 @@ static UnditherData *createGlobal(Palette &global, GifFileType *gif,
             it += padding;
         }
         d->frames->push_back(canvas);
+        switch (disposal) {
+            case DISPOSAL_UNSPECIFIED:
+            case DISPOSE_DO_NOT:
+                undisposed = frameNum;
+                break;
+            case DISPOSE_PREVIOUS:
+                canvas = (*d->frames)[undisposed];
+                break;
+        }
     }
     return d;
 }
